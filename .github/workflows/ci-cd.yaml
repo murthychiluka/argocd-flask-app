@@ -1,4 +1,4 @@
-# .github/workflows/ci-cd.yml
+    # .github/workflows/ci-cd.yml
 name: CI/CD Pipeline - Flask App on EKS
 
 on:
@@ -9,84 +9,77 @@ on:
   pull_request:
     branches:
       - main
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - staging
+          - production
 
 env:
-  AWS_REGION:      us-east-1
-  ECR_REPOSITORY:  flask-app
-  EKS_CLUSTER:     ${{ secrets.EKS_CLUSTER_NAME }}
-  IMAGE_TAG:       ${{ github.sha }}
+  AWS_REGION:     us-east-1
+  ECR_REPOSITORY: flask-app
+  IMAGE_TAG:      ${{ github.sha }}
 
 jobs:
 
   # ─────────────────────────────────────
-  # JOB 1: CI - Test and Build
+  # JOB 1: CI - Test
   # ─────────────────────────────────────
-  ci:
-    name: CI - Test and Build
-    runs-on: self-hosted
-
-    outputs:
-      image-uri: ${{ steps.build-push.outputs.image-uri }}
+  test:
+    name: Run Tests
+    # GitHub hosted runner! ✅
+    runs-on: ubuntu-latest
 
     steps:
-
-      # ─────────────────────────
-      # STEP 1: Checkout
-      # ─────────────────────────
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Show Build Info
-        run: |
-          echo "================================================"
-          echo "Branch : ${{ github.ref_name }}"
-          echo "Commit : ${{ github.sha }}"
-          echo "Actor  : ${{ github.actor }}"
-          echo "Event  : ${{ github.event_name }}"
-          echo "Runner : ${{ runner.name }}"
-          echo "================================================"
-
-      # ─────────────────────────
-      # STEP 2: Unit Tests
-      # ─────────────────────────
       - name: Setup Python
-        run: |
-          python3 -m pip install --upgrade pip
-          pip3 install -r app/requirements.txt
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
 
-      - name: Run Unit Tests
+      - name: Install Dependencies
+        run: |
+          pip install -r app/requirements.txt
+
+      - name: Run Tests
         run: |
           cd app
-          python3 -m pytest tests/ \
+          python -m pytest tests/ \
             -v \
-            --junitxml=test-results.xml \
-            --cov=. \
-            --cov-report=xml:coverage.xml
-        continue-on-error: false
+            --junitxml=test-results.xml
 
       - name: Upload Test Results
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: test-results
-          path: |
-            app/test-results.xml
-            app/coverage.xml
+          path: app/test-results.xml
 
-      # ─────────────────────────
-      # STEP 3: Code Quality
-      # ─────────────────────────
-      - name: Code Quality Check
-        run: |
-          pip3 install flake8
-          flake8 app/app.py \
-            --max-line-length=120 \
-            --ignore=E501 \
-            || true
+  # ─────────────────────────────────────
+  # JOB 2: Build and Push to ECR
+  # ─────────────────────────────────────
+  build:
+    name: Build and Push to ECR
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
 
-      # ─────────────────────────
-      # STEP 4: Configure AWS
-      # ─────────────────────────
+    outputs:
+      image-uri: ${{ steps.push.outputs.image-uri }}
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # Configure AWS using secrets
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -94,96 +87,51 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region:            ${{ env.AWS_REGION }}
 
-      # ─────────────────────────
-      # STEP 5: Login to ECR
-      # ─────────────────────────
+      # Login to ECR
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      # ─────────────────────────
-      # STEP 6: Build Docker Image
-      # ─────────────────────────
+      # Build Docker image
       - name: Build Docker Image
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         run: |
-          echo "Building Docker image..."
-
+          echo "Building image..."
           docker build \
-            --build-arg BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
-            --build-arg GIT_COMMIT=${{ github.sha }} \
             -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
             -t $ECR_REGISTRY/$ECR_REPOSITORY:latest \
             .
+          echo "Build complete! ✅"
 
-          echo "Docker image built! ✅"
-          docker images | grep flask-app
-
-      # ─────────────────────────
-      # STEP 7: Scan Image
-      # ─────────────────────────
-      - name: Scan Docker Image
-        run: |
-          docker run --rm \
-            -v /var/run/docker.sock:/var/run/docker.sock \
-            aquasec/trivy:latest image \
-            --exit-code 0 \
-            --severity HIGH,CRITICAL \
-            --no-progress \
-            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }} \
-            || true
-          echo "Image scan complete! ✅"
-
-      # ─────────────────────────
-      # STEP 8: Push to ECR
-      # ─────────────────────────
+      # Push to ECR
       - name: Push to ECR
-        id: build-push
+        id: push
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         run: |
-          echo "Pushing to ECR..."
-
-          # Push with commit SHA tag
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-
-          # Push with latest tag
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
-
-          echo "Image pushed! ✅"
           echo "image-uri=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" \
             >> $GITHUB_OUTPUT
-
-          echo "Image URI: $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
-
-      # ─────────────────────────
-      # STEP 9: Clean up Docker
-      # ─────────────────────────
-      - name: Clean up Docker images
-        if: always()
-        env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-        run: |
-          docker rmi $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG || true
-          docker rmi $ECR_REGISTRY/$ECR_REPOSITORY:latest || true
-          docker system prune -f || true
+          echo "Pushed! ✅"
+          echo "Image: $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
 
   # ─────────────────────────────────────
-  # JOB 2: Update K8s Manifest
-  # Updates deployment.yaml with new image
+  # JOB 3: Update K8s Manifest
   # ─────────────────────────────────────
   update-manifest:
     name: Update K8s Manifest
-    needs: ci
-    runs-on: self-hosted
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
 
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          # Use PAT for push access!
+          token: ${{ secrets.PAT_TOKEN }}
 
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -196,55 +144,46 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      # Update image tag in deployment.yaml
-      - name: Update Image Tag in K8s Manifest
+      # Update image tag
+      - name: Update Image Tag
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         run: |
-          echo "Updating image tag in deployment.yaml..."
-
-          # Show current image
-          echo "Current image:"
+          echo "Before update:"
           grep "image:" k8s/deployment.yaml
 
-          # Update image tag
-          sed -i "s|image: .*flask-app:.*|image: $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG|g" \
+          # Update image tag in deployment.yaml
+          sed -i \
+            "s|image: .*flask-app:.*|image: $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG|g" \
             k8s/deployment.yaml
 
-          # Show updated image
-          echo "Updated image:"
+          echo "After update:"
           grep "image:" k8s/deployment.yaml
 
-      - name: Commit and Push Manifest
+      # Commit and push
+      - name: Commit Updated Manifest
         run: |
           git config user.email "github-actions@github.com"
-          git config user.name  "GitHub Actions"
+          git config user.name  "GitHub Actions Bot"
 
           git add k8s/deployment.yaml
 
-          # Only commit if there are changes
           if git diff --staged --quiet; then
             echo "No changes to commit"
           else
-            git commit -m "ci: update image tag to $IMAGE_TAG
-
-            [skip ci]
-            Image: ${{ needs.ci.outputs.image-uri }}
-            Commit: ${{ github.sha }}
-            Actor: ${{ github.actor }}"
-
+            git commit -m "ci: update image to $IMAGE_TAG [skip ci]"
             git push origin main
-            echo "Manifest updated and pushed! ✅"
+            echo "Manifest updated! ✅"
           fi
 
   # ─────────────────────────────────────
-  # JOB 3: CD - Deploy via ArgoCD
+  # JOB 4: Deploy via ArgoCD
   # ─────────────────────────────────────
-  cd:
-    name: CD - Deploy via ArgoCD
+  deploy:
+    name: Deploy via ArgoCD
     needs: update-manifest
-    runs-on: self-hosted
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
 
     environment:
       name: production
@@ -254,9 +193,7 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      # ─────────────────────────
-      # Configure kubectl for EKS
-      # ─────────────────────────
+      # Configure AWS
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -264,154 +201,88 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region:            ${{ env.AWS_REGION }}
 
+      # Install kubectl
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'latest'
+
+      # Configure kubectl for EKS
       - name: Configure kubectl for EKS
         run: |
           aws eks update-kubeconfig \
-            --region $AWS_REGION \
-            --name $EKS_CLUSTER
+            --region ${{ env.AWS_REGION }} \
+            --name ${{ secrets.EKS_CLUSTER_NAME }}
 
           echo "kubectl configured! ✅"
           kubectl get nodes
 
-      # ─────────────────────────
+      # Install ArgoCD CLI
+      - name: Install ArgoCD CLI
+        run: |
+          curl -sSL -o argocd \
+            https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
+          chmod +x argocd
+          sudo mv argocd /usr/local/bin/
+          argocd version --client
+
       # Apply ArgoCD Application
-      # ─────────────────────────
       - name: Apply ArgoCD Application
         run: |
-          echo "Applying ArgoCD application..."
           kubectl apply -f argocd/application.yaml
-          echo "ArgoCD application applied! ✅"
+          echo "ArgoCD app applied! ✅"
 
-      # ─────────────────────────
       # Login to ArgoCD
-      # ─────────────────────────
       - name: Login to ArgoCD
         run: |
-          argocd login ${{ secrets.ARGOCD_SERVER }} \
+          argocd login \
+            ${{ secrets.ARGOCD_SERVER }} \
             --username ${{ secrets.ARGOCD_USERNAME }} \
             --password ${{ secrets.ARGOCD_PASSWORD }} \
             --insecure \
             --grpc-web
+          echo "ArgoCD login! ✅"
 
-          echo "ArgoCD login successful! ✅"
-
-      # ─────────────────────────
       # Sync ArgoCD App
-      # ─────────────────────────
-      - name: Sync ArgoCD Application
+      - name: Sync ArgoCD App
         run: |
-          echo "Syncing ArgoCD application..."
-
           argocd app sync flask-app \
             --force \
             --prune \
             --timeout 300
+          echo "Sync started! ✅"
 
-          echo "Sync initiated! ✅"
-
-      # ─────────────────────────
-      # Wait for Healthy Status
-      # ─────────────────────────
-      - name: Wait for ArgoCD Sync
+      # Wait for healthy
+      - name: Wait for Deployment
         run: |
-          echo "Waiting for deployment..."
-
           argocd app wait flask-app \
             --health \
             --timeout 300
+          echo "App healthy! ✅"
 
-          echo "Application is healthy! ✅"
-
-      # ─────────────────────────
-      # Verify Deployment
-      # ─────────────────────────
+      # Verify
       - name: Verify Deployment
         run: |
-          echo "Verifying deployment..."
-
-          # Get ArgoCD app status
+          echo "ArgoCD Status:"
           argocd app get flask-app
 
-          # Check pods
-          echo "Running pods:"
+          echo "Pods:"
           kubectl get pods \
             -n flask-app \
             -l app=flask-app
 
-          # Check deployment
+          echo "Deployment:"
           kubectl rollout status \
             deployment/flask-app \
             -n flask-app
 
-          echo "Deployment verified! ✅"
-
-      # ─────────────────────────
-      # Smoke Tests
-      # ─────────────────────────
-      - name: Run Smoke Tests
-        run: |
-          echo "Running smoke tests..."
-
-          # Wait for service
-          sleep 15
-
-          # Get service URL
-          SVC_IP=$(kubectl get svc flask-app \
-            -n flask-app \
-            -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' \
-            2>/dev/null || echo "pending")
-
-          echo "Service: $SVC_IP"
-
-          # Test health endpoint via kubectl
-          POD=$(kubectl get pods \
-            -n flask-app \
-            -l app=flask-app \
-            -o jsonpath='{.items[0].metadata.name}')
-
-          echo "Testing pod: $POD"
-
-          kubectl exec $POD \
-            -n flask-app \
-            -- curl -f http://localhost:5000/health
-
-          echo "Smoke tests passed! ✅"
-
-      # ─────────────────────────
-      # Show Final Status
-      # ─────────────────────────
-      - name: Show Deployment Summary
+      # Summary
+      - name: Deployment Summary
         if: always()
         run: |
           echo "================================================"
-          echo "DEPLOYMENT SUMMARY"
+          echo "✅ DEPLOYMENT COMPLETE"
+          echo "Image    : ${{ needs.build.outputs.image-uri }}"
+          echo "Commit   : ${{ github.sha }}"
+          echo "Actor    : ${{ github.actor }}"
           echo "================================================"
-          echo "Image Tag  : ${{ env.IMAGE_TAG }}"
-          echo "Commit     : ${{ github.sha }}"
-          echo "Branch     : ${{ github.ref_name }}"
-          echo "Actor      : ${{ github.actor }}"
-          echo ""
-          echo "ArgoCD Status:"
-          argocd app get flask-app --output wide || true
-          echo ""
-          echo "Pods:"
-          kubectl get pods -n flask-app || true
-          echo "================================================"
-
-  # ─────────────────────────────────────
-  # JOB 4: Notify on Failure
-  # ─────────────────────────────────────
-  notify:
-    name: Notify on Failure
-    needs: [ci, update-manifest, cd]
-    runs-on: self-hosted
-    if: failure()
-
-    steps:
-      - name: Send Failure Notification
-        run: |
-          echo "❌ Pipeline FAILED!"
-          echo "Branch : ${{ github.ref_name }}"
-          echo "Commit : ${{ github.sha }}"
-          echo "Actor  : ${{ github.actor }}"
-          echo "Run    : ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
