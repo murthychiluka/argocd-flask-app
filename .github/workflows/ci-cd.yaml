@@ -23,7 +23,7 @@ on:
 
 env:
   AWS_REGION:     us-east-1
-  ECR_REPOSITORY: flask-app
+  ECR_REPOSITORY: a1
   IMAGE_TAG:      ${{ github.sha }}
 
 jobs:
@@ -154,8 +154,8 @@ jobs:
 
           # Update image tag in deployment.yaml
           sed -i \
-            "s|image: .*flask-app:.*|image: $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG|g" \
-            k8s/deployment.yaml
+             "s|^[[:space:]]*image:.*|        image: $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG|" \
+             k8s/deployment.yaml
 
           echo "After update:"
           grep "image:" k8s/deployment.yaml
